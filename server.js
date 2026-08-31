@@ -4,6 +4,7 @@ const axios = require('axios');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
+const { track } = require('@vercel/analytics/server');
 
 // Import our simple in-memory database
 const {
@@ -257,6 +258,14 @@ app.post('/api/notify/job-alert', async (req, res) => {
       [location, distance || '1', jobType, payout || '₹400', jobId]
     );
 
+    // Track analytics event
+    if (result.success) {
+      await track('Job Alert Sent', {
+        jobType: jobType,
+        status: 'success'
+      }).catch(err => console.error('Analytics tracking error:', err));
+    }
+
     res.json({
       ...result,
       jobId: jobId,
@@ -298,6 +307,14 @@ app.post('/api/notify/engineer-assigned', async (req, res) => {
       [engineerName, engineerRating || '4.5', eta || '30', distance || '2', engineerContact || SUPPORT_PHONE, orderId]
     );
 
+    // Track analytics event
+    if (result.success) {
+      await track('Engineer Assigned', {
+        orderId: orderId,
+        status: 'success'
+      }).catch(err => console.error('Analytics tracking error:', err));
+    }
+
     res.json({
       ...result,
       orderId: orderId,
@@ -337,6 +354,15 @@ app.post('/api/notify/job-completed', async (req, res) => {
       [orderId, serviceType || 'Battery Service', amount, engineerName || `${COMPANY_NAME} Engineer`]
     );
 
+    // Track analytics event
+    if (result.success) {
+      await track('Job Completed', {
+        orderId: orderId,
+        serviceType: serviceType || 'Battery Service',
+        status: 'success'
+      }).catch(err => console.error('Analytics tracking error:', err));
+    }
+
     res.json({
       ...result,
       orderId: orderId,
@@ -373,6 +399,14 @@ app.post('/api/notify/payment-request', async (req, res) => {
       [orderId, serviceType || 'Battery Service', amount]
     );
 
+    // Track analytics event
+    if (result.success) {
+      await track('Payment Requested', {
+        orderId: orderId,
+        status: 'success'
+      }).catch(err => console.error('Analytics tracking error:', err));
+    }
+
     res.json({
       ...result,
       orderId: orderId,
@@ -405,6 +439,14 @@ app.post('/api/notify/engineer-payment', async (req, res) => {
       'engineer_payment_received_v1',
       [orderId, String(amount).replace('₹', ''), upiId || 'xxxx@bank', weeklyTotal || '0']
     );
+
+    // Track analytics event
+    if (result.success) {
+      await track('Engineer Payment Sent', {
+        orderId: orderId,
+        status: 'success'
+      }).catch(err => console.error('Analytics tracking error:', err));
+    }
 
     res.json({
       ...result,
