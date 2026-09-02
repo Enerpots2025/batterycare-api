@@ -58,11 +58,11 @@ const authenticateApiKey = (req, res, next) => {
   const apiKey = req.headers['x-api-key'] || req.query.api_key;
   
   // Skip authentication for webhook verification
-  if (req.path === '/webhook' && req.method === 'GET') {
-    return next();
-  }
-  
-  if (!apiKey || apiKey !== API_KEY) {
+  if (req.path === '/webhook') {
+  return next();
+}
+
+   if (!apiKey || apiKey !== API_KEY) {
     console.warn('❌ Unauthorized API access attempt');
     return res.status(401).json({
       success: false,
@@ -650,16 +650,37 @@ const handleEngineerAcceptance = async (phone, response, engineer) => {
   }
 };
 
+// ✅ FIXED
 const handleEngineerRejection = async (phone, response, engineer) => {
-  // Similar to acceptance but with rejection
-  await sendWhatsAppText(phone, `ℹ️ Job rejected. You'll receive new job alerts shortly.`);
+  // Try to get job ID from "NO JOB123" or "REJECT JOB123"
+  const jobMatch = response.match(/(?:NO|REJECT)\s*([A-Z0-9]+)/i);
+  let jobId = jobMatch ? jobMatch[1] : null;
+
+  // Fallback: find the most recent pending job for this engineer
+  if (!jobId) {
+    const pendingJobs = getJobsForEngineer(phone, 'pending_engineer_response');
+    if (pendingJobs.length > 0) {
+      jobId = pendingJobs[0].id;
+    }
+  }
+
+  if (jobId) {
+    updateJobStatus(jobId, 'rejected', {
+      rejectedBy: phone,
+      rejectedAt: new Date().toISOString()
+    });
+  }
+
   updateEngineerStatus(phone, 'available');
-  
-  // Notify admin about rejection if needed
+  await sendWhatsAppText(phone, `ℹ️ Job rejected. You'll receive new job alerts shortly.`);
+
   if (ADMIN_PHONES.length > 0) {
-    await sendWhatsAppText(ADMIN_PHONES[0], `⚠️ Engineer ${engineer.name || phone} rejected a job offer`);
+    await sendWhatsAppText(ADMIN_PHONES[0],
+      `⚠️ Engineer ${engineer.name || phone} rejected job ${jobId || 'unknown'}`
+    );
   }
 };
+
 
 const setEngineerOnline = async (phone, engineer) => {
   updateEngineerStatus(phone, 'available');
@@ -714,8 +735,8 @@ const sendEarningsStatus = async (phone, engineer) => {
   
   const completedJobs = getJobsForEngineer(phone, 'completed');
   const totalEarnings = completedJobs.reduce((sum, job) => {
-    const payout = parseInt(job.payout.replace(/[^0-9]/g, '')) || 0;
-    return sum + payout;
+  const payout = parseInt((job.payout || '0').replace(/[^0-9]/g, '')) || 0;
+     return sum + payout;
   }, 0);
   
   const earningsText = `💰 Your Earnings Summary:\n\n` +
