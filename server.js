@@ -19,7 +19,11 @@ const {
   getJobsByStatus,
   closeJob,
   getAccountByPhone
+  saveEngineer,
+  updateEngineerEarnings
 } = require('./memory-db');
+// Then in the register route, UNCOMMENT:
+saveEngineer(engineer);
 
 // Initialize Express app
 const app = express();
