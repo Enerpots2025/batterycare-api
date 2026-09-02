@@ -1,4 +1,11 @@
 {
+  // Add after require('dotenv').config();
+  const REQUIRED_ENV = ['WHATSAPP_API_TOKEN', 'PHONE_NUMBER_ID'];
+  REQUIRED_ENV.forEach(key => {
+  if (!process.env[key]) {
+  console.warn(`⚠️  WARNING: Environment variable ${key} is not set!`);
+}
+});
   "name": "batterycare-backend",
   "version": "1.0.0",
   "description": "WhatsApp API backend for BatteryCare Service Platform",
