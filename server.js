@@ -598,24 +598,24 @@ const sendHelpMessage = async (phone, accountType) => {
   console.log(`📖 Sent help message to ${phone.substring(0, 10)}...`);
 };
 
+// ✅ FIXED
 const handleEngineerAcceptance = async (phone, response, engineer) => {
-  // Extract job ID from response (e.g., "YES JOB123" or "YESJOB123")
   const jobMatch = response.match(/YES\s*([A-Z0-9]+)/i);
-  const jobId = jobMatch ? jobMatch[1] : null;
-  
+  let jobId = jobMatch ? jobMatch[1] : null;  // ← let, not const
+
   if (!jobId) {
-    // Get pending jobs for this engineer
     const pendingJobs = getJobsForEngineer(phone, 'pending_engineer_response');
-    
+
     if (pendingJobs.length === 0) {
-      await sendWhatsAppText(phone, '❌ No pending jobs found. Please specify job ID: YES JOB123');
+      await sendWhatsAppText(phone, '❌ No pending jobs found. Reply: YES JOB123');
       return;
     }
-    
-    // Accept the most recent pending job
+
     const latestJob = pendingJobs[0];
-    jobId = latestJob.id;
+    jobId = latestJob.id;  // ✅ now works
   }
+  // ...
+};
   
   // Update job status
   const job = getJob(jobId);
