@@ -1,0 +1,6 @@
+project/
+├── api/
+│   └── server.js          ← This becomes entry point, exports `handler`
+├── serviceAccountKey.json ← ❌ Don’t use this in Vercel. Use env vars instead
+├── package.json
+└── vercel.json
