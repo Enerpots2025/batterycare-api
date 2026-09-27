@@ -50,6 +50,10 @@ app.use(express.static('public'));
 // tokens instead of the x-api-key scheme used by the WhatsApp endpoints.
 app.use('/api/state', require('./app-state'));
 
+// Live technician location during active jobs — same Firebase token auth,
+// kept in its own small fast table separate from the app-state blob.
+app.use('/api/location', require('./location'));
+
 // ============================
 // CONFIGURATION
 // ============================
