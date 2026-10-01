@@ -11,14 +11,9 @@
 
 const express = require('express');
 const admin = require('firebase-admin');
-const { Pool } = require('pg');
+const { pool, readState } = require('./state-store');
 
 const router = express.Router();
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
-});
 
 // One row per technician — only ever holds their MOST RECENT position.
 // We deliberately do not keep history here (no route replay feature).
@@ -54,6 +49,13 @@ const verifyFirebaseToken = async (req, res, next) => {
     }
     const idToken = authHeader.split('Bearer ')[1];
     const decodedToken = await admin.auth().verifyIdToken(idToken);
+
+    // Only real technician/ops/OEM logins may post or read live location —
+    // never an anonymous customer session.
+    if (decodedToken.firebase && decodedToken.firebase.sign_in_provider === 'anonymous') {
+      return res.status(403).json({ success: false, error: 'Anonymous accounts cannot access this endpoint' });
+    }
+
     req.user = { uid: decodedToken.uid, email: decodedToken.email || null };
     next();
   } catch (error) {
@@ -62,10 +64,32 @@ const verifyFirebaseToken = async (req, res, next) => {
   }
 };
 
+// Confirms the signed-in user's Firebase UID actually belongs to the
+// technician record they're claiming to be (matched via authUid on the
+// technician record inside the main app_state blob). Without this, any
+// logged-in user could post a fake location for any other technician.
+const verifyTechnicianOwnership = async (req, res, next) => {
+  try {
+    const techId = req.body.techId || req.params.techId;
+    const row = await readState();
+    const technicians = (row && row.data && row.data.technicians) || [];
+    const tech = technicians.find(t => t.id === techId);
+
+    // Must be this technician's own login, and they must be approved.
+    if (!tech || tech.authUid !== req.user.uid || tech.status === 'Pending') {
+      return res.status(403).json({ success: false, error: 'You can only update your own location' });
+    }
+    next();
+  } catch (error) {
+    console.error('❌ Error verifying technician ownership:', error);
+    res.status(500).json({ success: false, error: 'Failed to verify technician' });
+  }
+};
+
 // POST /api/location — a technician's browser pings their current position.
 // Body: { techId, lat, lng }
 // Upserts — always overwrites the previous position, no history kept.
-router.post('/', verifyFirebaseToken, async (req, res) => {
+router.post('/', verifyFirebaseToken, verifyTechnicianOwnership, async (req, res) => {
   try {
     const { techId, lat, lng } = req.body;
 
