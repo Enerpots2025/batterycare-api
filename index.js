@@ -54,6 +54,14 @@ app.use('/api/state', require('./app-state'));
 // kept in its own small fast table separate from the app-state blob.
 app.use('/api/location', require('./location'));
 
+// Dedicated, limited API for the customer-facing portal — the only backend
+// surface anonymous (customer) tokens are allowed to reach.
+app.use('/api/customer', require('./customer-api'));
+
+// Sign-up related endpoints for people not yet allowed into the full app
+// data: first-admin check, technician self-registration, own-record lookup.
+app.use('/api/onboarding', require('./onboarding'));
+
 // ============================
 // CONFIGURATION
 // ============================
