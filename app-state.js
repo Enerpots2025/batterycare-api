@@ -1,32 +1,28 @@
 // ============================
 // app-state.js
 // ============================
-// Purpose: replace Firestore as the storage for your web app's data
-// (technicians, OEMs, jobs, etc.), while KEEPING Firebase purely for
-// login (Authentication). The whole app state is stored as a single
-// JSON document in Postgres — same shape as your old Firestore doc —
-// so the frontend's data model does not need to change at all.
+// The full app data (technicians, OEMs, jobs, catalogue, ...) stored as one
+// JSON document in Postgres. Firebase is used ONLY for login; this file
+// decides who is allowed in.
 //
-// Auth model:
-//   - The frontend still signs users in with Firebase Authentication.
-//   - After signing in, the frontend gets a Firebase ID token
-//     (currentUser.getIdToken()) and sends it as:
-//       Authorization: Bearer <token>
-//     on every request to this API.
-//   - This file verifies that token using Firebase Admin SDK (server-side),
-//     so only genuinely logged-in users can read/write your data.
+// Who may read/write the full data:
+//   - Ops admins (their email is listed in opsUsers)
+//   - Approved technicians (a technician record with their login's uid,
+//     status not "Pending")
+//   - OEM partners (an OEM record with their login's uid)
+//   - Anyone real, but ONLY while no admin exists yet (first-admin setup)
+// Everyone else — anonymous customers, strangers who just signed up, and
+// technicians still awaiting approval — gets a 403 and never sees the data.
 
 const express = require('express');
 const admin = require('firebase-admin');
-const { Pool } = require('pg');
+const { readState, mutateState } = require('./state-store');
 
 const router = express.Router();
 
 // ----------------------------
-// Firebase Admin initialization
+// Firebase Admin initialization (credentials come from env vars)
 // ----------------------------
-// Reads credentials from environment variables (NOT a committed JSON
-// file — committing a service account key would leak a private key).
 if (!admin.apps.length) {
   const privateKey = process.env.FIREBASE_PRIVATE_KEY
     ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
@@ -47,42 +43,7 @@ if (!admin.apps.length) {
 }
 
 // ----------------------------
-// Postgres connection
-// ----------------------------
-// DATABASE_URL is provided automatically by Render when you create a
-// Postgres database and link it to this web service (or you can paste
-// the "External Database URL" into your service's environment variables).
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
-});
-
-// Ensure the table exists. This app state is stored as ONE row (id = 1)
-// containing the entire app JSON blob, mirroring the old single Firestore
-// document (batterycare/state).
-const ensureTable = async () => {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS app_state (
-      id INTEGER PRIMARY KEY DEFAULT 1,
-      data JSONB NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      CONSTRAINT single_row CHECK (id = 1)
-    );
-  `);
-};
-let tableReadyPromise = null;
-const getTableReady = () => {
-  if (!tableReadyPromise) {
-    tableReadyPromise = ensureTable().catch(err => {
-      tableReadyPromise = null; // allow retry on next request if this failed
-      throw err;
-    });
-  }
-  return tableReadyPromise;
-};
-
-// ----------------------------
-// Middleware: verify Firebase ID token
+// Step 1: is this a real, valid, non-anonymous login?
 // ----------------------------
 const verifyFirebaseToken = async (req, res, next) => {
   try {
@@ -94,11 +55,12 @@ const verifyFirebaseToken = async (req, res, next) => {
     const idToken = authHeader.split('Bearer ')[1];
     const decodedToken = await admin.auth().verifyIdToken(idToken);
 
-    req.user = {
-      uid: decodedToken.uid,
-      email: decodedToken.email || null
-    };
+    // Anonymous sessions (customer portal) never reach the full data.
+    if (decodedToken.firebase && decodedToken.firebase.sign_in_provider === 'anonymous') {
+      return res.status(403).json({ success: false, code: 'anonymous', error: 'Anonymous accounts cannot access this endpoint' });
+    }
 
+    req.user = { uid: decodedToken.uid, email: decodedToken.email || null };
     next();
   } catch (error) {
     console.error('❌ Firebase token verification failed:', error.message);
@@ -107,45 +69,128 @@ const verifyFirebaseToken = async (req, res, next) => {
 };
 
 // ----------------------------
+// Step 2: is this login linked to an approved account?
+// ----------------------------
+const authorize = async (req, res, next) => {
+  try {
+    const row = await readState();
+    const data = row ? row.data : null;
+    const opsUsers = (data && data.opsUsers) || [];
+
+    // Nothing saved yet, or no admin yet: first-admin setup window.
+    if (!data || opsUsers.length === 0) {
+      req.role = 'bootstrap';
+      return next();
+    }
+
+    const email = (req.user.email || '').toLowerCase();
+    if (opsUsers.some(e => String(e).toLowerCase() === email)) {
+      req.role = 'ops';
+      return next();
+    }
+
+    const tech = (data.technicians || []).find(t => t.authUid === req.user.uid);
+    if (tech && tech.status !== 'Pending') {
+      req.role = 'technician';
+      return next();
+    }
+
+    const oem = (data.oems || []).find(o => o.authUid === req.user.uid);
+    if (oem) {
+      req.role = 'oem';
+      return next();
+    }
+
+    return res.status(403).json({
+      success: false,
+      code: tech ? 'pending-approval' : 'not-linked',
+      error: tech ? 'Your registration is awaiting approval' : 'This login is not linked to an account'
+    });
+  } catch (error) {
+    console.error('❌ Authorization check failed:', error);
+    res.status(500).json({ success: false, error: 'Authorization check failed' });
+  }
+};
+
+// Records created by someone else (a customer submitting a job, a
+// technician registering) while this browser had the app open must survive
+// this browser's next save. Any job/technician on the server that this
+// browser has never seen (created after the version it loaded) is kept.
+const MERGE_KEYS = ['jobs', 'technicians'];
+const mergeConcurrentAdditions = (clientData, serverData, baseUpdatedAt) => {
+  const base = new Date(baseUpdatedAt).getTime();
+  const merged = { ...clientData };
+  let changed = false;
+
+  for (const key of MERGE_KEYS) {
+    const clientArr = Array.isArray(clientData[key]) ? clientData[key] : [];
+    const serverArr = Array.isArray(serverData[key]) ? serverData[key] : [];
+    const knownIds = new Set(clientArr.map(x => x && x.id));
+    const additions = serverArr.filter(x =>
+      x && x.id && !knownIds.has(x.id) && x.createdAt && new Date(x.createdAt).getTime() > base
+    );
+    if (additions.length) {
+      merged[key] = [...clientArr, ...additions];
+      changed = true;
+    }
+  }
+  return { merged, changed };
+};
+
+// ----------------------------
 // Routes
 // ----------------------------
 
-// GET /api/state — load the whole app state (or null if nothing saved yet)
-router.get('/', verifyFirebaseToken, async (req, res) => {
+// GET /api/state — load the whole app state
+router.get('/', verifyFirebaseToken, authorize, async (req, res) => {
   try {
-    await getTableReady();
-    const result = await pool.query('SELECT data FROM app_state WHERE id = 1');
-
-    if (result.rows.length === 0) {
-      return res.json({ success: true, data: null });
-    }
-
-    res.json({ success: true, data: result.rows[0].data });
+    const row = await readState();
+    if (!row) return res.json({ success: true, data: null, updatedAt: null });
+    res.json({ success: true, data: row.data, updatedAt: new Date(row.updatedAt).toISOString() });
   } catch (error) {
     console.error('❌ Error loading app state:', error);
     res.status(500).json({ success: false, error: 'Failed to load app state' });
   }
 });
 
-// PUT /api/state — save (overwrite) the whole app state
-router.put('/', verifyFirebaseToken, async (req, res) => {
+// PUT /api/state — save the whole app state.
+// Body: { data: <state>, baseUpdatedAt: <version this browser last loaded> }
+router.put('/', verifyFirebaseToken, authorize, async (req, res) => {
   try {
-    const newState = req.body;
+    const clientData = req.body && req.body.data;
+    const baseUpdatedAt = req.body && req.body.baseUpdatedAt;
 
-    if (!newState || typeof newState !== 'object') {
-      return res.status(400).json({ success: false, error: 'Request body must be a JSON object' });
+    if (!clientData || typeof clientData !== 'object' || Array.isArray(clientData)) {
+      return res.status(400).json({ success: false, error: 'Body must be { data: <object>, baseUpdatedAt }' });
     }
 
-    await getTableReady();
+    const out = await mutateState((serverData, serverUpdatedAt) => {
+      let next = { ...clientData };
 
-    await pool.query(
-      `INSERT INTO app_state (id, data, updated_at)
-       VALUES (1, $1, now())
-       ON CONFLICT (id) DO UPDATE SET data = $1, updated_at = now()`,
-      [newState]
-    );
+      // Only admins may change who the admins are. Without this, any
+      // approved technician could add their own email to opsUsers.
+      if (req.role === 'technician' || req.role === 'oem') {
+        next.opsUsers = (serverData && serverData.opsUsers) || [];
+      }
 
-    res.json({ success: true, message: 'App state saved' });
+      let mergedApplied = false;
+      if (serverData && baseUpdatedAt && serverUpdatedAt &&
+          new Date(serverUpdatedAt).getTime() > new Date(baseUpdatedAt).getTime()) {
+        const { merged, changed } = mergeConcurrentAdditions(next, serverData, baseUpdatedAt);
+        next = merged;
+        mergedApplied = changed;
+      }
+
+      return { data: next, result: { mergedApplied, finalData: next } };
+    });
+
+    res.json({
+      success: true,
+      updatedAt: new Date(out.updatedAt).toISOString(),
+      // Only sent back when something from someone else was folded in, so
+      // the browser can show it without a manual refresh.
+      merged: out.result.mergedApplied ? out.result.finalData : null
+    });
   } catch (error) {
     console.error('❌ Error saving app state:', error);
     res.status(500).json({ success: false, error: 'Failed to save app state' });
